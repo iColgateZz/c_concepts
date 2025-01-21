@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "*.html": "html",
+        "stdbool.h": "c",
+        "stdint.h": "c",
+        "stdlib.h": "c",
+        "assert.h": "c",
+        "_malloc.h": "c"
+    }
+}
