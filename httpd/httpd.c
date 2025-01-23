@@ -7,8 +7,10 @@
 #include <string.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <sys/errno.h>
 
 #define LISTENADDR "127.0.0.1"
+#define MAXLINE 1024
 
 /* structures */
 typedef struct HttpRequest {
@@ -18,7 +20,7 @@ typedef struct HttpRequest {
 
 /* global */
 char* errorDesc;
-pid_t originalPid;
+
 
 /* Return 0 on error, valid socket fd on success. */
 int initServer(const int port) {
@@ -49,7 +51,7 @@ int initServer(const int port) {
         errorDesc = "listen() error";
         return 0;
     }
-    printf("Listening on %s:%d\n", LISTENADDR, port);
+    printf("Listening on %s:%d\n\n-----------------------------\n\n", LISTENADDR, port);
 
     return s;
 }
@@ -59,16 +61,20 @@ int acceptClient(const int s) {
     int c;
     socklen_t addrlen;
     struct sockaddr_in cli;
+    char addr[32];
 
     addrlen = 0;
     memset(&cli, 0, sizeof(cli));
+    memset(addr, 0, 32);
 
     c = accept(s, (struct sockaddr*) &cli, &addrlen);
     if (c < 0) {
         errorDesc = "accept() error";
         return 0;
     }
-    printf("Accepted %d\n", addrlen);
+
+    inet_ntop(AF_INET, &cli, addr, 32 - 1);
+    printf("Client connection: %s\nFd: %d\n", addr, c);
 
     return c;
 }
@@ -85,6 +91,8 @@ HttpRequest* parseHttpRequest(const char* str, const int n) {
     HttpRequest* req;
     size_t i, k;
     char* method, *url;
+
+    if (!n) return parseHttpRequestError(req, 0);
 
     req = malloc(sizeof(HttpRequest));
     memset(req, 0, sizeof(HttpRequest));
@@ -113,67 +121,94 @@ HttpRequest* parseHttpRequest(const char* str, const int n) {
 }
 
 char* readClient(const int c, int* len) {
-    static char buf[512];
+    char* buf;
+    int ret;
+    fd_set rfds;
+    struct timeval tv;
 
-    memset(buf, 0, 512);
-    *len = read(c, buf, 512 - 1);
-    if (*len == -1) {
+    buf = malloc(MAXLINE);
+    memset(buf, 0, MAXLINE);
+    *len = 0;
+
+    /* read() blocks for 1 second at most. */
+    memset(&tv, 0, sizeof(tv));
+    tv.tv_usec = 0;
+    tv.tv_sec = 1;
+
+    FD_ZERO(&rfds);
+    FD_SET(c, &rfds);
+
+    ret = select(c + 1, &rfds, 0, 0, &tv);
+
+    printf("Ret: %d; ", ret);
+    printf("ISSET %d\n", FD_ISSET(c, &rfds));
+
+    if (ret && FD_ISSET(c, &rfds))
+        *len = read(c, buf, MAXLINE - 1);
+    /*
+        The pointer associated with fildes is negative.
+        The value provided for nbyte exceeds INT_MAX.
+    */
+
+    if (*len <= 0) {
         errorDesc = "readClient() error";
         return 0;
     }
+
+    printf("Len: %d\n", *len);
 
     return buf;
 }
 
 void sendHttpResponse(int c, int code, char* respMsg, char* cType, char* body) {
-    char buf[512];
+    char buf[MAXLINE];
     int n;
 
-    memset(buf, 0, 512);
+    memset(buf, 0, MAXLINE);
 
     sprintf(buf, 
     "HTTP/1.1 %d %s\n"
-    "Server: httpd"
+    "Server: httpd\n"
     "Content-type: %s\n"
     "\n"
     "%s\n",
     code, respMsg, cType, body);
 
     if (write(c, buf, strlen(buf)) < 0) {
-        fprintf(stderr, "sendHttpResponse() error\n");
+        fprintf(stderr, "sendHttpResponse() error: %d\n", errno);
     }
 }
 
-void handleClient(const int s, const int c) {
+void handleClient(const int c) {
     HttpRequest* req;
     char* p;
     int len;
-    char* code;
 
     p = readClient(c, &len);
     if (!p) {
-        fprintf(stderr, "%s\n", errorDesc);
+        fprintf(stderr, "%s: %d\n", errorDesc, errno);
         close(c);
         return;
     }
 
+    printf("%s\n", p);
+
     req = parseHttpRequest(p, len);
     if (!req) {
-        fprintf(stderr, "%s\n", errorDesc);
+        fprintf(stderr, "%s: %d\n", errorDesc, errno);
+        free(p);
         close(c);
         return;
     }
 
     if (!strcmp(req->method, "GET") && !strcmp(req->url, "/")) {
-        code = "200";
-        execl("sendHttpResponse", "sendHttpResponse", );
         sendHttpResponse(c, 200, "OK", "text/html", "<html><h1>Front page</h1></html>");
     } else {
-        code = "404";
         sendHttpResponse(c, 404, "Not found", "text/plain", "Page not found");
     }
 
     free(req);
+    free(p);
     close(c);
 }
 
@@ -182,12 +217,8 @@ void handleClient(const int s, const int c) {
     to check if the server is running.
 */
 int main(int argc, char* argv[]) {
-    int s, c;
+    int s, c, f;
     char* port;
-    pid_t ppid;
-
-    originalPid = getpid();
-    printf("Original pid: %d\n", originalPid);
 
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <port>\n", argv[0]);
@@ -197,27 +228,26 @@ int main(int argc, char* argv[]) {
     port = argv[1];
     s = initServer(atoi(port));
     if (!s) {
-        fprintf(stderr, "%s\n", errorDesc);
+        fprintf(stderr, "%s: %d\n", errorDesc, errno);
         return -1;
     }
 
     while (1) {
         c = acceptClient(s);
         if (!c) {
-            fprintf(stderr, "%s\n", errorDesc);
+            fprintf(stderr, "%s: %d\n", errorDesc, errno);
             continue;
         }
 
-        int forkVal = fork();
-        if (forkVal == 0) {
-            handleClient(s, c);
-            break;
-        } else if (forkVal == -1) {
-            fprintf(stderr, "Fork() error");
+        /* If > 2000 calls then fork EAGAIN error (35). */
+        f = fork();
+        if (f == 0) {
+            handleClient(c);
+             break;
+        } else if (f == -1) {
+            fprintf(stderr, "Fork() error: %d\n", errno);
         }
-
-        if (getpid() != originalPid)
-            break;
+        close(c);
     }
 
     close(s);

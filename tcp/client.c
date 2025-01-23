@@ -4,18 +4,18 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* This should be some real ip address. */
 #define IP "127.0.0.1"
-#define PORT 8181
 
-void func() {
+void func(char* path, int port) {
     int s;
     struct sockaddr_in sock;
     char buffer[512];
-    char* data;
+    char data[64];
 
-    data = "HEAD / HTTP/1.0\r\n\r\n";
+    sprintf(data, "GET %s HTTP/1.0\n", path);
 
     s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
@@ -24,7 +24,7 @@ void func() {
     }
 
     sock.sin_addr.s_addr = inet_addr(IP);
-    sock.sin_port = htons(PORT);
+    sock.sin_port = htons(port);
     sock.sin_family = AF_INET;
 
     if (connect(s, (struct sockaddr*) &sock, sizeof(struct sockaddr_in)) != 0) {
@@ -35,15 +35,20 @@ void func() {
 
     write(s, data, strlen(data));
     memset(buffer, 0, 512);
-    // read(s, buffer, 511);
+    read(s, buffer, 511);
     close(s);
 
-    // printf("\n%s\n", buffer);
+    printf("\n%s\n", buffer);
 }
 
-int main(void) {
-    for (int i = 0; i < 1000; i++) {
-        func();
+int main(int argc, char* argv[]) {
+    if (argc <= 3) {
+        fprintf(stderr, "Usage: ./%s <int:num> <str:path> <int:port>\n", argv[0]);
+        return -1;
+    }
+
+    for (int i = 0; i < atoi(argv[1]); i++) {
+        func(argv[2], atoi(argv[3]));
     }
     return 0;
 }
