@@ -1,4 +1,7 @@
 /* httpd.c */
+
+
+/* C libraries */
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -9,14 +12,22 @@
 #include <signal.h>
 #include <sys/errno.h>
 
-#define LISTENADDR "127.0.0.1"
-#define MAXLINE 1024
+
+/* Custom libraries */
+#include "logger.c"
+
+
+/* Definitions */
+#define LISTENADDR "192.168.1.239"
+#define MAXLINE 65536
+
 
 /* structures */
 typedef struct HttpRequest {
     char method[8];
     char url[128];
 } HttpRequest;
+
 
 /* global */
 char* errorDesc;
@@ -26,9 +37,10 @@ char* errorDesc;
 int initServer(const int port) {
     int s;
     struct sockaddr_in srv;
+    struct in_addr lol;
 
-    printf("Initializing the server\n");
-    printf("Opening a socket\n");
+    loggerInfo("Initializing the server\n");
+    loggerInfo("Opening a socket\n");
     s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
         errorDesc = "socket() error";
@@ -39,7 +51,7 @@ int initServer(const int port) {
     srv.sin_port = htons(port);
     srv.sin_addr.s_addr = inet_addr(LISTENADDR);
 
-    printf("Binding to port %d\n", port);
+    loggerInfo("Binding to port %d\n", port);
     if (bind(s, (struct sockaddr*) &srv, sizeof(srv))) {
         close(s);
         errorDesc = "bind() error";
@@ -51,7 +63,7 @@ int initServer(const int port) {
         errorDesc = "listen() error";
         return 0;
     }
-    printf("Listening on %s:%d\n\n-----------------------------\n\n", LISTENADDR, port);
+    loggerInfo("Listening on %s:%d\n\n-----------------------------\n\n", LISTENADDR, port);
 
     return s;
 }
@@ -59,13 +71,13 @@ int initServer(const int port) {
 /* return 0 on error, valid client socket fd on success. */
 int acceptClient(const int s) {
     int c;
-    socklen_t addrlen;
     struct sockaddr_in cli;
+    socklen_t addrlen;
     char addr[32];
 
-    addrlen = 0;
     memset(&cli, 0, sizeof(cli));
     memset(addr, 0, 32);
+    addrlen = sizeof(cli);
 
     c = accept(s, (struct sockaddr*) &cli, &addrlen);
     if (c < 0) {
@@ -73,8 +85,10 @@ int acceptClient(const int s) {
         return 0;
     }
 
-    inet_ntop(AF_INET, &cli, addr, 32 - 1);
-    printf("Client connection: %s\nFd: %d\n", addr, c);
+    getpeername(c, (struct sockaddr*)&cli, &addrlen);
+    inet_ntop(AF_INET, &cli.sin_addr, addr, sizeof(addr));
+
+    loggerAttention("Client connection: %s\n", addr);
 
     return c;
 }
@@ -140,22 +154,14 @@ char* readClient(const int c, int* len) {
 
     ret = select(c + 1, &rfds, 0, 0, &tv);
 
-    printf("Ret: %d; ", ret);
-    printf("ISSET %d\n", FD_ISSET(c, &rfds));
-
     if (ret && FD_ISSET(c, &rfds))
         *len = read(c, buf, MAXLINE - 1);
-    /*
-        The pointer associated with fildes is negative.
-        The value provided for nbyte exceeds INT_MAX.
-    */
 
+    loggerWarning("Len: %d\n", *len);
     if (*len <= 0) {
         errorDesc = "readClient() error";
         return 0;
     }
-
-    printf("Len: %d\n", *len);
 
     return buf;
 }
@@ -175,7 +181,7 @@ void sendHttpResponse(int c, int code, char* respMsg, char* cType, char* body) {
     code, respMsg, cType, body);
 
     if (write(c, buf, strlen(buf)) < 0) {
-        fprintf(stderr, "sendHttpResponse() error: %d\n", errno);
+        loggerError(stderr, "sendHttpResponse() error: %d\n", errno);
     }
 }
 
@@ -186,16 +192,16 @@ void handleClient(const int c) {
 
     p = readClient(c, &len);
     if (!p) {
-        fprintf(stderr, "%s: %d\n", errorDesc, errno);
+        loggerError(stderr, "%s: %d\n", errorDesc, errno);
         close(c);
         return;
     }
 
-    printf("%s\n", p);
+    loggerInfo("%s\n", p);
 
     req = parseHttpRequest(p, len);
     if (!req) {
-        fprintf(stderr, "%s: %d\n", errorDesc, errno);
+        loggerError(stderr, "%s: %d\n", errorDesc, errno);
         free(p);
         close(c);
         return;
@@ -215,27 +221,31 @@ void handleClient(const int c) {
 /*
     netstat -an | grep LISTEN
     to check if the server is running.
+
+    To look for memory leaks, run the program,
+    in the other terminal window find the pid,
+    use "leaks <pid>"
 */
 int main(int argc, char* argv[]) {
     int s, c, f;
     char* port;
 
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
+        loggerError(stderr, "Usage: %s <port>\n", argv[0]);
         return -1;
     }
 
     port = argv[1];
     s = initServer(atoi(port));
     if (!s) {
-        fprintf(stderr, "%s: %d\n", errorDesc, errno);
+        loggerError(stderr, "%s: %d\n", errorDesc, errno);
         return -1;
     }
 
     while (1) {
         c = acceptClient(s);
         if (!c) {
-            fprintf(stderr, "%s: %d\n", errorDesc, errno);
+            loggerWarning("%s: %d\n", errorDesc, errno);
             continue;
         }
 
@@ -243,9 +253,9 @@ int main(int argc, char* argv[]) {
         f = fork();
         if (f == 0) {
             handleClient(c);
-             break;
+            break;
         } else if (f == -1) {
-            fprintf(stderr, "Fork() error: %d\n", errno);
+            loggerWarning("Fork() error: %d\n", errno);
         }
         close(c);
     }
