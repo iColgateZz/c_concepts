@@ -1,6 +1,5 @@
 /* httpd.c */
 
-
 /* C libraries */
 #include <stdio.h>
 #include <sys/types.h>
@@ -12,24 +11,23 @@
 #include <signal.h>
 #include <sys/errno.h>
 
-
 /* Custom libraries */
-#include "logger.c"
-
+#include "logger/logger.c"
+#include "stringlib/stringlib.c"
+#include "htable/htable.c"
 
 /* Definitions */
 #define LISTENADDR "192.168.1.239"
 #define MAXLINE 65536
+#define HEADER_BUF_SIZE 256
 
-
-/* structures */
+/* Structures */
 typedef struct HttpRequest {
     char method[8];
     char url[128];
 } HttpRequest;
 
-
-/* global */
+/* Global */
 char* errorDesc;
 
 
@@ -94,42 +92,63 @@ int acceptClient(const int s) {
 }
 
 /* parseHttpRequest helper function. */
-HttpRequest* parseHttpRequestError(HttpRequest* req, int val) {
+HttpRequest* parseHttpRequestError(HttpRequest* req, char* errorMsg) {
     free(req);
-    sprintf(errorDesc, "parseHttpRequest() error %d", val);
+    sprintf(errorDesc, "parseHttpRequest() error: %s", errorMsg);
     return 0;
 }
 
 /* return 0 on error, or an HttpRequest*. */
-HttpRequest* parseHttpRequest(const char* str, const int n) {
+HttpRequest* parseHttpRequest(char* str, int n) {
     HttpRequest* req;
-    size_t i, k;
-    char* method, *url;
-
-    if (!n) return parseHttpRequestError(req, 0);
+    char* p;
+    int len;
+    ht_hash_table* htable;
+    char headerKey[HEADER_BUF_SIZE], headerVal[HEADER_BUF_SIZE];
 
     req = malloc(sizeof(HttpRequest));
     memset(req, 0, sizeof(HttpRequest));
+    memset(headerKey, 0, HEADER_BUF_SIZE);
+    memset(headerVal, 0, HEADER_BUF_SIZE);
+    len = n;
+    htable = ht_new();
 
-    i = strcspn(str, " ");
-    if (i >= n || i > 8 - 1)
-        return parseHttpRequestError(req, 1);
+    /* Parse the starting line. */
+    p = copyUntilChar(str, req->method, ' ', 8, &len);
+    if (!p) return parseHttpRequestError(req, "EOL after method");
 
-    for (int j = 0; j < i; j++)
-        req->method[j] = str[j];
-    req->method[i] = 0;
+    p = copyUntilChar(p, req->url, ' ', 128, &len);
+    if (!p) return parseHttpRequestError(req, "EOL after url");
 
-    i++;
-    if (i >= n)
-        return parseHttpRequestError(req, 2);
-    
-    k = strcspn(str + i, " ");
-    if (k >= 128 - 1)
-        return parseHttpRequestError(req, 3);
+    /* 
+        Skip over the HTTP version.
+        The headers are actually optional, 
+        but for now I assume they are required.
+    */
+    p = copyUntilChar(p, NULL, '\n', 0, &len);
+    if (!p) return parseHttpRequestError(req, "EOL after HTTP version");
 
-    for (int j = 0; j < k; j++)
-        req->url[j] = str[i + j];
-    req->url[i + k] = 0;
+    /* Parse the headers. */
+    while (p) {
+        /* key */
+        p = copyUntilChar(p, headerKey, ':', HEADER_BUF_SIZE, &len);
+        if (!p) return parseHttpRequestError(req, "EOL after key");
+        p++; len--; /* skip over whitespace */
+        if (!p) return parseHttpRequestError(req, "EOL after key");
+
+        /* val */
+        p = copyUntilChar(p, headerVal, '\r', HEADER_BUF_SIZE, &len);
+        p++; len--; /* skip over \n */
+        if (!p) return parseHttpRequestError(req, "EOL after val");
+
+        ht_insert(htable, headerKey, headerVal);
+        if (*p == '\r') break;
+    }
+    ht_print_table(htable);
+
+    /* Parse the body. */
+
+    ht_del_hash_table(htable);
 
     return req;
 }
