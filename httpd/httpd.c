@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <sys/errno.h>
+#include <stdbool.h>
 
 /* Custom libraries */
 #include "logger/logger.c"
@@ -17,11 +18,13 @@
 #include "htable/htable.c"
 
 /* Definitions */
-#define LISTENADDR "192.168.1.239"
-#define MAXLINE 65536 //64kb
-#define HEADER_BUF_SIZE 256
-#define METHOD_SIZE 8
-#define URL_SIZE 1024
+#define LISTENADDR              "0.0.0.0"
+#define MAXLINE                 65536 //64kb
+#define HEADER_BUF_SIZE         256
+#define METHOD_SIZE             8
+#define URL_SIZE                1024
+#define ALLOWED_CYCLE_NUMBER    5
+#define SECONDS_TO_WAIT         10
 
 /* Structures */
 typedef struct HttpRequest {
@@ -69,14 +72,13 @@ int initServer(const int port) {
 }
 
 /* return 0 on error, valid client socket fd on success. */
-int acceptClient(const int s) {
+int acceptClient(const int s, char cliIP[INET_ADDRSTRLEN]) {
     int c;
     struct sockaddr_in cli;
     socklen_t addrlen;
-    char addr[32];
 
     memset(&cli, 0, sizeof(cli));
-    memset(addr, 0, 32);
+    memset(cliIP, 0, INET_ADDRSTRLEN);
     addrlen = sizeof(cli);
 
     c = accept(s, (struct sockaddr*) &cli, &addrlen);
@@ -85,50 +87,46 @@ int acceptClient(const int s) {
         return 0;
     }
 
-    getpeername(c, (struct sockaddr*)&cli, &addrlen);
-    inet_ntop(AF_INET, &cli.sin_addr, addr, sizeof(addr));
-
-    loggerAttention("Client connection: %s\n", addr);
+    if (getpeername(c, (struct sockaddr*)&cli, &addrlen) < 0) {
+        errorDesc = "getpeername() error";
+        return 0;
+    }
+    
+    if (inet_ntop(AF_INET, &cli.sin_addr, cliIP, INET_ADDRSTRLEN) == NULL) {
+        errorDesc = "inet_ntop() error";
+        return 0;
+    }
 
     return c;
 }
 
 /* parseHttpRequest helper function. */
-HttpRequest* parseHttpRequestError(HttpRequest* req, ht_hash_table* table, char* errorMsg) {
-    free(req);
-    ht_del_hash_table(table);
+bool parseHttpRequestError(char* errorMsg) {
     sprintf(errorDesc, "parseHttpRequest() error: %s", errorMsg);
-    return 0;
+    return false;
 }
 
 /* return 0 on error, or an HttpRequest*. */
-HttpRequest* parseHttpRequest(char* str, int n) {
-    HttpRequest* req;
+bool parseHttpRequest(char* str, int len, HttpRequest* req, ht_hash_table* headers, char body[MAXLINE]) {
     char* p;
-    int len;
-    ht_hash_table* htable;
     char headerKey[HEADER_BUF_SIZE]; 
     char headerVal[HEADER_BUF_SIZE];
-    char body[MAXLINE];
 
-    req = malloc(sizeof(HttpRequest));
     memset(req, 0, sizeof(HttpRequest));
     memset(headerKey, 0, HEADER_BUF_SIZE);
     memset(headerVal, 0, HEADER_BUF_SIZE);
     memset(body, 0, MAXLINE);
-    len = n;
-    htable = ht_new();
 
     /* Parse the starting line. */
     p = copyUntilChar(str, req->method, ' ', METHOD_SIZE, &len);
-    if (!p) return parseHttpRequestError(req, htable, "EOL after method");
+    if (!p) return parseHttpRequestError("EOL after method");
 
     p = copyUntilChar(p, req->url, ' ', URL_SIZE, &len);
-    if (!p) return parseHttpRequestError(req, htable, "EOL after url");
+    if (!p) return parseHttpRequestError("EOL after url");
 
     /* Skip over the HTTP version. */
     p = copyUntilChar(p, NULL, '\n', 0, &len);
-    if (!p) return parseHttpRequestError(req, htable, "EOL after HTTP version");
+    if (!p) return parseHttpRequestError("EOL after HTTP version");
 
     /* 
         Parse the headers.
@@ -138,119 +136,117 @@ HttpRequest* parseHttpRequest(char* str, int n) {
     while (p) {
         /* key */
         p = copyUntilChar(p, headerKey, ':', HEADER_BUF_SIZE, &len);
-        if (!p) return parseHttpRequestError(req, htable, "EOL after key");
+        if (!p) return parseHttpRequestError("EOL after key");
         p++; len--; /* skip over whitespace */
-        if (!p) return parseHttpRequestError(req, htable, "EOL after key");
+        if (!p) return parseHttpRequestError("EOL after key");
 
         /* val */
         p = copyUntilChar(p, headerVal, '\r', HEADER_BUF_SIZE, &len);
         p++; len--; /* skip over \n */
-        if (!p) return parseHttpRequestError(req, htable, "EOL after val");
+        if (!p) return parseHttpRequestError("EOL after val");
 
-        ht_insert(htable, headerKey, headerVal);
-        loggerAttention("Len is %d\n", len);
+        ht_insert(headers, headerKey, headerVal);
         if (*p == '\r') break;
     }
 
     /*
         Parse the body if it is present.
-        Check the htable for Content-Length.
+        Check the headers for Content-Length.
      */
-    if (ht_search(htable, "content-length") != NULL && len > 2) {
+    if (ht_search(headers, "content-length") != NULL && len > 2) {
         p += 2;
-        len = atoi(ht_search(htable, "content-length"));
+        len = atoi(ht_search(headers, "content-length"));
         strncpy(body, p, len);
-        printf("The body is %s\n", body);
     }
 
-    ht_del_hash_table(htable);
-
-    return req;
+    return true;
 }
 
-char* readClient(const int c, int* len) {
-    char* buf;
+void readClient(const int c, int* len, char request[MAXLINE]) {
     int ret;
     fd_set rfds;
     struct timeval tv;
 
-    buf = malloc(MAXLINE);
-    memset(buf, 0, MAXLINE);
     *len = 0;
 
-    /* read() blocks for 1 second at most. */
     memset(&tv, 0, sizeof(tv));
     tv.tv_usec = 0;
-    tv.tv_sec = 1;
+    tv.tv_sec = SECONDS_TO_WAIT;
 
     FD_ZERO(&rfds);
     FD_SET(c, &rfds);
 
     ret = select(c + 1, &rfds, 0, 0, &tv);
 
-    if (ret && FD_ISSET(c, &rfds))
-        *len = read(c, buf, MAXLINE - 1);
+    if (ret > 0 && FD_ISSET(c, &rfds))
+        *len = read(c, request, MAXLINE - 1);
 
     loggerWarning("Len: %d\n", *len);
-    if (*len <= 0) {
+    if (*len <= 0)
         errorDesc = "readClient() error";
-        return 0;
-    }
 
-    return buf;
+    return;
 }
 
 void sendHttpResponse(int c, int code, char* respMsg, char* cType, char* body) {
     char buf[MAXLINE];
-    int n;
 
     memset(buf, 0, MAXLINE);
 
     sprintf(buf, 
-    "HTTP/1.1 %d %s\n"
-    "Server: httpd\n"
-    "Content-type: %s\n"
-    "\n"
-    "%s\n",
-    code, respMsg, cType, body);
+    "HTTP/1.1 %d %s\r\n"
+    "Server: httpd\r\n"
+    "Content-type: %s\r\n"
+    "Content-Length: %zu\r\n"
+    "Connection: keep-alive\r\n"
+    "\r\n"
+    "%s",
+    code, respMsg, cType, strlen(body), body);
 
     if (write(c, buf, strlen(buf)) < 0) {
         loggerError(stderr, "sendHttpResponse() error: %d\n", errno);
     }
 }
 
-void handleClient(const int c) {
-    HttpRequest* req;
-    char* p;
+void handleClient(const int c, char cliIP[INET_ADDRSTRLEN]) {
+    HttpRequest req;
+    ht_hash_table* headers;
+    char body[MAXLINE];
+    char request[MAXLINE];
     int len;
+    int counter;
 
-    p = readClient(c, &len);
-    if (!p) {
-        loggerError(stderr, "%s: %d\n", errorDesc, errno);
-        close(c);
-        return;
+    loggerAttention("Client connection: %s\n", cliIP);
+    headers = ht_new();
+    counter = 0;
+
+    while (counter < ALLOWED_CYCLE_NUMBER) {
+        memset(request, 0, MAXLINE);
+        readClient(c, &len, request);
+        if (len <= 0) {
+            loggerError(stderr, "%s: %d\n", errorDesc, errno);
+            break;
+        }
+
+        loggerInfo("%s\n", request);
+
+        if (!parseHttpRequest(request, len, &req, headers, body)) {
+            loggerError(stderr, "%s: %d\n", errorDesc, errno);
+            counter++;
+            continue;
+        }
+
+        if (!strcmp(req.method, "get") && !strcmp(req.url, "/")) {
+            sendHttpResponse(c, 200, "OK", "text/html", "<html><h1>Front page</h1></html>");
+        } else {
+            sendHttpResponse(c, 404, "Not found", "text/plain", "Page not found");
+        }
+        counter++;
     }
 
-    loggerInfo("%s\n", p);
-
-    req = parseHttpRequest(p, len);
-    if (!req) {
-        loggerError(stderr, "%s: %d\n", errorDesc, errno);
-        free(p);
-        sendHttpResponse(c, 400, "Bad Request", "text/plain", "Wrong request format");
-        close(c);
-        return;
-    }
-
-    if (!strcmp(req->method, "GET") && !strcmp(req->url, "/")) {
-        sendHttpResponse(c, 200, "OK", "text/html", "<html><h1>Front page</h1></html>");
-    } else {
-        sendHttpResponse(c, 404, "Not found", "text/plain", "Page not found");
-    }
-
-    free(req);
-    free(p);
+    ht_del_hash_table(headers);
     close(c);
+    return;
 }
 
 /*
@@ -264,6 +260,7 @@ void handleClient(const int c) {
 int main(int argc, char* argv[]) {
     int s, c, f;
     char* port;
+    char cliIP[INET_ADDRSTRLEN];
 
     if (argc < 2) {
         loggerError(stderr, "Usage: %s <port>\n", argv[0]);
@@ -278,7 +275,7 @@ int main(int argc, char* argv[]) {
     }
 
     while (1) {
-        c = acceptClient(s);
+        c = acceptClient(s, cliIP);
         if (!c) {
             loggerWarning("%s: %d\n", errorDesc, errno);
             continue;
@@ -287,7 +284,7 @@ int main(int argc, char* argv[]) {
         /* If > 2000 calls then fork EAGAIN error (35). */
         f = fork();
         if (f == 0) {
-            handleClient(c);
+            handleClient(c, cliIP);
             break;
         } else if (f == -1) {
             loggerWarning("Fork() error: %d\n", errno);
