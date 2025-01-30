@@ -21,7 +21,7 @@ char* copyUntilChar(char* text, char* buf, const char ch, int bufSize, int* text
 
     while (*tmp && *tmp != ch && i < bufSize - 1 && i < *textSize) {
         if (buf != NULL)
-            buf[i] = *tmp;
+            buf[i] = tolower(*tmp);
         i++;
         tmp++;
     }
@@ -38,22 +38,3 @@ char* copyUntilChar(char* text, char* buf, const char ch, int bufSize, int* text
         return tmp;
     }
 }
-
-// int main(void) {
-//     char* str = "GET/HTTP/1.1\r\n";
-//     int len = strlen(str);
-//     int bufSize = 32;
-//     printf("Strlen: %d\n", len);
-//     char buf[bufSize];
-//     char* p;
-
-//     memset(buf, 'a', bufSize);
-
-//     p = copyUntilChar(str, NULL, '1', bufSize, &len);
-
-//     printf("Buf: %s\n", buf);
-//     printf("Char: '%c'\n", *p);
-//     printf("Len: %d\n", len);
-
-//     return 0;
-// }

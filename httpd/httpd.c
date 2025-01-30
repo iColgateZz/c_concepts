@@ -18,13 +18,15 @@
 
 /* Definitions */
 #define LISTENADDR "192.168.1.239"
-#define MAXLINE 65536
+#define MAXLINE 65536 //64kb
 #define HEADER_BUF_SIZE 256
+#define METHOD_SIZE 8
+#define URL_SIZE 1024
 
 /* Structures */
 typedef struct HttpRequest {
-    char method[8];
-    char url[128];
+    char method[METHOD_SIZE];
+    char url[URL_SIZE];
 } HttpRequest;
 
 /* Global */
@@ -92,8 +94,9 @@ int acceptClient(const int s) {
 }
 
 /* parseHttpRequest helper function. */
-HttpRequest* parseHttpRequestError(HttpRequest* req, char* errorMsg) {
+HttpRequest* parseHttpRequestError(HttpRequest* req, ht_hash_table* table, char* errorMsg) {
     free(req);
+    ht_del_hash_table(table);
     sprintf(errorDesc, "parseHttpRequest() error: %s", errorMsg);
     return 0;
 }
@@ -104,49 +107,61 @@ HttpRequest* parseHttpRequest(char* str, int n) {
     char* p;
     int len;
     ht_hash_table* htable;
-    char headerKey[HEADER_BUF_SIZE], headerVal[HEADER_BUF_SIZE];
+    char headerKey[HEADER_BUF_SIZE]; 
+    char headerVal[HEADER_BUF_SIZE];
+    char body[MAXLINE];
 
     req = malloc(sizeof(HttpRequest));
     memset(req, 0, sizeof(HttpRequest));
     memset(headerKey, 0, HEADER_BUF_SIZE);
     memset(headerVal, 0, HEADER_BUF_SIZE);
+    memset(body, 0, MAXLINE);
     len = n;
     htable = ht_new();
 
     /* Parse the starting line. */
-    p = copyUntilChar(str, req->method, ' ', 8, &len);
-    if (!p) return parseHttpRequestError(req, "EOL after method");
+    p = copyUntilChar(str, req->method, ' ', METHOD_SIZE, &len);
+    if (!p) return parseHttpRequestError(req, htable, "EOL after method");
 
-    p = copyUntilChar(p, req->url, ' ', 128, &len);
-    if (!p) return parseHttpRequestError(req, "EOL after url");
+    p = copyUntilChar(p, req->url, ' ', URL_SIZE, &len);
+    if (!p) return parseHttpRequestError(req, htable, "EOL after url");
+
+    /* Skip over the HTTP version. */
+    p = copyUntilChar(p, NULL, '\n', 0, &len);
+    if (!p) return parseHttpRequestError(req, htable, "EOL after HTTP version");
 
     /* 
-        Skip over the HTTP version.
-        The headers are actually optional, 
-        but for now I assume they are required.
+        Parse the headers.
+        The headers are actually optional, but
+        for now I assume they are always present.
     */
-    p = copyUntilChar(p, NULL, '\n', 0, &len);
-    if (!p) return parseHttpRequestError(req, "EOL after HTTP version");
-
-    /* Parse the headers. */
     while (p) {
         /* key */
         p = copyUntilChar(p, headerKey, ':', HEADER_BUF_SIZE, &len);
-        if (!p) return parseHttpRequestError(req, "EOL after key");
+        if (!p) return parseHttpRequestError(req, htable, "EOL after key");
         p++; len--; /* skip over whitespace */
-        if (!p) return parseHttpRequestError(req, "EOL after key");
+        if (!p) return parseHttpRequestError(req, htable, "EOL after key");
 
         /* val */
         p = copyUntilChar(p, headerVal, '\r', HEADER_BUF_SIZE, &len);
         p++; len--; /* skip over \n */
-        if (!p) return parseHttpRequestError(req, "EOL after val");
+        if (!p) return parseHttpRequestError(req, htable, "EOL after val");
 
         ht_insert(htable, headerKey, headerVal);
+        loggerAttention("Len is %d\n", len);
         if (*p == '\r') break;
     }
-    ht_print_table(htable);
 
-    /* Parse the body. */
+    /*
+        Parse the body if it is present.
+        Check the htable for Content-Length.
+     */
+    if (ht_search(htable, "content-length") != NULL && len > 2) {
+        p += 2;
+        len = atoi(ht_search(htable, "content-length"));
+        strncpy(body, p, len);
+        printf("The body is %s\n", body);
+    }
 
     ht_del_hash_table(htable);
 
@@ -222,6 +237,7 @@ void handleClient(const int c) {
     if (!req) {
         loggerError(stderr, "%s: %d\n", errorDesc, errno);
         free(p);
+        sendHttpResponse(c, 400, "Bad Request", "text/plain", "Wrong request format");
         close(c);
         return;
     }
