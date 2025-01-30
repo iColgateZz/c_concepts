@@ -1,9 +1,0 @@
-{
-    "files.associations": {
-        "*.html": "html",
-        "inet.h": "c",
-        "stdio.h": "c",
-        "signal.h": "c",
-        "errno.h": "c"
-    }
-}
