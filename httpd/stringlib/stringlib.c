@@ -32,8 +32,7 @@ char* copyUntilChar(char* text, char* buf, const char ch, int bufSize, int* text
     if (*tmp && i < *textSize) {
         *textSize -= (i + 1);
         return ++tmp;
-    }
-    else {
+    } else {
         *textSize -= i;
         return tmp;
     }

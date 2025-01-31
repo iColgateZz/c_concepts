@@ -1,5 +1,11 @@
 /* httpd.c */
 
+/* 
+    Specs used for the server:
+    https://datatracker.ietf.org/doc/html/rfc9112
+    https://developer.mozilla.org/en-US/docs/Web/HTTP
+*/
+
 /* C libraries */
 #include <stdio.h>
 #include <sys/types.h>
@@ -18,19 +24,24 @@
 #include "htable/htable.c"
 
 /* Definitions */
-#define LISTENADDR              "0.0.0.0"
+#define LISTENADDR              "192.168.1.239"
 #define MAXLINE                 65536 //64kb
 #define HEADER_BUF_SIZE         256
 #define METHOD_SIZE             8
-#define URL_SIZE                1024
-#define ALLOWED_CYCLE_NUMBER    5
+#define URI_SIZE                8000
 #define SECONDS_TO_WAIT         10
 
+/* Definitions for the parser */
+#define BAD_REQUEST             400
+#define NO_HEADERS              2
+#define NOT_IMPLEMENTED         501
+#define URI_TOO_LONG            414
+
 /* Structures */
-typedef struct HttpRequest {
+typedef struct RequestLine {
     char method[METHOD_SIZE];
-    char url[URL_SIZE];
-} HttpRequest;
+    char uri[URI_SIZE];
+} RequestLine;
 
 /* Global */
 char* errorDesc;
@@ -100,59 +111,103 @@ int acceptClient(const int s, char cliIP[INET_ADDRSTRLEN]) {
     return c;
 }
 
-/* parseHttpRequest helper function. */
-bool parseHttpRequestError(char* errorMsg) {
-    sprintf(errorDesc, "parseHttpRequest() error: %s", errorMsg);
-    return false;
-}
-
 /* return 0 on error, or an HttpRequest*. */
-bool parseHttpRequest(char* str, int len, HttpRequest* req, ht_hash_table* headers, char body[MAXLINE]) {
+int parseHttpRequest(char* str, int len, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
     char* p;
     char headerKey[HEADER_BUF_SIZE]; 
     char headerVal[HEADER_BUF_SIZE];
 
-    memset(req, 0, sizeof(HttpRequest));
+    memset(reqLine, 0, sizeof(RequestLine));
     memset(headerKey, 0, HEADER_BUF_SIZE);
     memset(headerVal, 0, HEADER_BUF_SIZE);
     memset(body, 0, MAXLINE);
 
-    /* Parse the starting line. */
-    p = copyUntilChar(str, req->method, ' ', METHOD_SIZE, &len);
-    if (!p) return parseHttpRequestError("EOL after method");
+    /* Skip initial empty lines if there are any */
+    while ((*str == '\r' || *str == '\n') && *str) {
+        str++;
+        len--;
+    }
 
-    p = copyUntilChar(p, req->url, ' ', URL_SIZE, &len);
-    if (!p) return parseHttpRequestError("EOL after url");
+    /*  A recipient that receives whitespace between the start-line and 
+        the first header field MUST either reject the message as invalid or ...
+        The server SHOULD respond with a 400 (Bad Request) response 
+        and close the connection.  */
+    if (*str == ' ') {
+        errorDesc = "parseHttpRequest() error: whitespace after start-line";
+        return BAD_REQUEST;
+    }
+
+    /* Parse the request line. */
+    p = copyUntilChar(str, reqLine->method, ' ', METHOD_SIZE, &len);
+    if (!p) {
+        errorDesc = "parseHttpRequest() error: EOL after method";
+        return BAD_REQUEST;
+    }
+
+    /*  A server that receives a method longer than any that it implements
+        SHOULD respond with a 501 (Not Implemented) status code.  */
+    if (*(p - 1) != ' ') {
+        errorDesc = "parseHttpRequest() error: method too long";
+        return NOT_IMPLEMENTED;
+    }
+
+    p = copyUntilChar(p, reqLine->uri, ' ', URI_SIZE, &len);
+    if (!p) {
+        errorDesc = "parseHttpRequest() error: EOL after uri";
+        return BAD_REQUEST;
+    }
+
+    /*  A server that receives a request-target longer than any URI it
+        wishes to parse MUST respond with a 414 (URI Too Long) status code  */
+    if (*(p - 1) != ' ') {
+        errorDesc = "parseHttpRequest() error: URI too long";
+        return URI_TOO_LONG;
+    }
 
     /* Skip over the HTTP version. */
     p = copyUntilChar(p, NULL, '\n', 0, &len);
-    if (!p) return parseHttpRequestError("EOL after HTTP version");
+    if (!p) return BAD_REQUEST;
+    if (len == 2 && *p == '\r' && *(p + 1) == '\n') return NO_HEADERS;
 
-    /* 
-        Parse the headers.
-        The headers are actually optional, but
-        for now I assume they are always present.
-    */
+    /* Parse the headers. */
     while (p) {
         /* key */
         p = copyUntilChar(p, headerKey, ':', HEADER_BUF_SIZE, &len);
-        if (!p) return parseHttpRequestError("EOL after key");
+        if (!p) {
+            errorDesc = "parseHttpRequest() error: EOL after key";
+            return BAD_REQUEST;
+        }
         p++; len--; /* skip over whitespace */
-        if (!p) return parseHttpRequestError("EOL after key");
+        if (!p) {
+            errorDesc = "parseHttpRequest() error: EOL after key";
+            return BAD_REQUEST;
+        }
 
         /* val */
         p = copyUntilChar(p, headerVal, '\r', HEADER_BUF_SIZE, &len);
+        if (!p) {
+            errorDesc = "parseHttpRequest() error: EOL after value";
+            return BAD_REQUEST;
+        }
         p++; len--; /* skip over \n */
-        if (!p) return parseHttpRequestError("EOL after val");
+        if (!p) {
+            errorDesc = "parseHttpRequest() error: EOL after value";
+            return BAD_REQUEST;
+        }
 
         ht_insert(headers, headerKey, headerVal);
         if (*p == '\r') break;
     }
 
-    /*
-        Parse the body if it is present.
-        Check the headers for Content-Length.
-     */
+    /*  A server MUST respond with a 400 (Bad Request) status code
+        to any HTTP/1.1 request message that lacks a Host header field  */
+    if (ht_search(headers, "host") == NULL) {
+        errorDesc = "parseHttpRequest() error: no Host header field";
+        return BAD_REQUEST;
+    }
+
+    /*  Parse the body if it is present.
+        Check the headers for Content-Length.  */
     if (ht_search(headers, "content-length") != NULL && len > 2) {
         p += 2;
         len = atoi(ht_search(headers, "content-length"));
@@ -168,7 +223,7 @@ void readClient(const int c, int* len, char request[MAXLINE]) {
     struct timeval tv;
 
     *len = 0;
-
+    memset(request, 0, MAXLINE);
     memset(&tv, 0, sizeof(tv));
     tv.tv_usec = 0;
     tv.tv_sec = SECONDS_TO_WAIT;
@@ -182,7 +237,7 @@ void readClient(const int c, int* len, char request[MAXLINE]) {
         *len = read(c, request, MAXLINE - 1);
 
     loggerWarning("Len: %d\n", *len);
-    if (*len <= 0)
+    if (*len < 0)
         errorDesc = "readClient() error";
 
     return;
@@ -209,41 +264,40 @@ void sendHttpResponse(int c, int code, char* respMsg, char* cType, char* body) {
 }
 
 void handleClient(const int c, char cliIP[INET_ADDRSTRLEN]) {
-    HttpRequest req;
+    RequestLine reqLine;
     ht_hash_table* headers;
     char body[MAXLINE];
     char request[MAXLINE];
-    int len;
-    int counter;
+    int len, keepAlive, parseReturn;
 
-    loggerAttention("Client connection: %s\n", cliIP);
+    loggerAttention("Client connected: %s\n", cliIP);
     headers = ht_new();
-    counter = 0;
+    keepAlive = 1;
 
-    while (counter < ALLOWED_CYCLE_NUMBER) {
-        memset(request, 0, MAXLINE);
+    while (keepAlive) {
         readClient(c, &len, request);
-        if (len <= 0) {
+        if (len < 0) {
             loggerError(stderr, "%s: %d\n", errorDesc, errno);
             break;
-        }
+        } else if (len == 0)
+            break;
 
         loggerInfo("%s\n", request);
+        parseReturn = parseHttpRequest(request, len, &reqLine, headers, body);
+        loggerError(stderr, "%s\n", errorDesc);
 
-        if (!parseHttpRequest(request, len, &req, headers, body)) {
-            loggerError(stderr, "%s: %d\n", errorDesc, errno);
-            counter++;
-            continue;
+        if (ht_search(headers, "connection") != NULL) {
+
         }
 
-        if (!strcmp(req.method, "get") && !strcmp(req.url, "/")) {
+        if (!strcmp(reqLine.method, "get") && !strcmp(reqLine.uri, "/")) {
             sendHttpResponse(c, 200, "OK", "text/html", "<html><h1>Front page</h1></html>");
         } else {
             sendHttpResponse(c, 404, "Not found", "text/plain", "Page not found");
         }
-        counter++;
     }
 
+    loggerAttention("Client disconnected: %s\n", cliIP);
     ht_del_hash_table(headers);
     close(c);
     return;
