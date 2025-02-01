@@ -2,6 +2,7 @@
 
 /* 
     Specs used for the server:
+    https://datatracker.ietf.org/doc/html/rfc9110
     https://datatracker.ietf.org/doc/html/rfc9112
     https://developer.mozilla.org/en-US/docs/Web/HTTP
 */
@@ -34,8 +35,17 @@
 /* Definitions for the parser */
 #define BAD_REQUEST             400
 #define NO_HEADERS              2
+#define NO_BODY                 3
 #define NOT_IMPLEMENTED         501
 #define URI_TOO_LONG            414
+#define ACCEPTED                0
+
+/* Macros */
+#define SET_ERROR_AND_RETURN(desc, code) \
+    do { \
+        errorDesc = desc; \
+        return code; \
+    } while (0)
 
 /* Structures */
 typedef struct RequestLine {
@@ -111,16 +121,92 @@ int acceptClient(const int s, char cliIP[INET_ADDRSTRLEN]) {
     return c;
 }
 
-/* return 0 on error, or an HttpRequest*. */
-int parseHttpRequest(char* str, int len, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
-    char* p;
+int parseRequestLine(char** str, int* len, RequestLine* reqLine) {
+    memset(reqLine, 0, sizeof(RequestLine));
+
+    char* p = copyUntilChar(*str, reqLine->method, ' ', METHOD_SIZE, len);
+    if (!p)
+        SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after method", BAD_REQUEST);
+
+    /*  A server that receives a method longer than any that it implements
+        SHOULD respond with a 501 (Not Implemented) status code.  */
+    if (*(p - 1) != ' ')
+        SET_ERROR_AND_RETURN("parseHttpRequest() error: method too long", NOT_IMPLEMENTED);
+
+    p = copyUntilChar(p, reqLine->uri, ' ', URI_SIZE, len);
+    if (!p)
+        SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after URI", BAD_REQUEST);
+
+    /*  A server that receives a request-target longer than any URI it
+        wishes to parse MUST respond with a 414 (URI Too Long) status code  */
+    if (*(p - 1) != ' ')
+        SET_ERROR_AND_RETURN("parseHttpRequest() error: URI too long", URI_TOO_LONG);
+
+    /* Skip over the HTTP version. */
+    *str = copyUntilChar(p, NULL, '\n', 0, len);
+    if (!(*str)) return BAD_REQUEST;
+    if (*len == 2 && *p == '\r' && *(p + 1) == '\n') return NO_HEADERS;
+
+    return ACCEPTED;
+}
+
+int parseHeaders(char** str, int* len, ht_hash_table* headers) {
     char headerKey[HEADER_BUF_SIZE]; 
     char headerVal[HEADER_BUF_SIZE];
 
-    memset(reqLine, 0, sizeof(RequestLine));
     memset(headerKey, 0, HEADER_BUF_SIZE);
     memset(headerVal, 0, HEADER_BUF_SIZE);
-    memset(body, 0, MAXLINE);
+
+    while (**str) {
+        /* key */
+        char* p = copyUntilChar(*str, headerKey, ':', HEADER_BUF_SIZE, len);
+        if (!p)
+            SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after key", BAD_REQUEST);
+        p++; (*len)--; /* skip over whitespace */
+        if (!p)
+            SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after key", BAD_REQUEST);
+
+        /* val */
+        p = copyUntilChar(p, headerVal, '\r', HEADER_BUF_SIZE, len);
+        if (!p)
+            SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after value", BAD_REQUEST);
+        p++; (*len)--; /* skip over \n */
+        if (!p)
+            SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after value", BAD_REQUEST);
+
+        if (ht_search(headers, headerKey) != NULL)
+            SET_ERROR_AND_RETURN("parseHttpRequest() error: duplicate headers", BAD_REQUEST);
+        ht_insert(headers, headerKey, headerVal);
+        *str = p;
+        if (**str == '\r') break;
+    }
+
+    /*  A server MUST respond with a 400 (Bad Request) status code
+        to any HTTP/1.1 request message that lacks a Host header field  */
+    if (ht_search(headers, "host") == NULL)
+        SET_ERROR_AND_RETURN("parseHttpRequest() error: no Host field", BAD_REQUEST);
+
+    return ACCEPTED;
+}
+
+int parseBody(char** str, int* len, ht_hash_table* headers, char body[MAXLINE]) {
+    const char* contentLen = ht_search(headers, "content-length");
+
+    if (*len == 2) return NO_BODY;
+    if (contentLen != NULL && *len > 2) {
+        *str += 2;
+        int expectedLen = atoi(contentLen);
+        if (*len != expectedLen)
+            SET_ERROR_AND_RETURN("parseHttpRequest() error: problems with length", BAD_REQUEST);
+        strncpy(body, *str, *len);
+    }
+    return ACCEPTED;
+}
+
+/* return ACCEPTED on success or a custom code on error */
+int parseHttpRequest(char* str, int len, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
+    char* p;
+    int status;
 
     /* Skip initial empty lines if there are any */
     while ((*str == '\r' || *str == '\n') && *str) {
@@ -128,93 +214,20 @@ int parseHttpRequest(char* str, int len, RequestLine* reqLine, ht_hash_table* he
         len--;
     }
 
+    status = parseRequestLine(&str, &len, reqLine);
+    if (status != ACCEPTED) return status;
+
     /*  A recipient that receives whitespace between the start-line and 
         the first header field MUST either reject the message as invalid or ...
         The server SHOULD respond with a 400 (Bad Request) response 
         and close the connection.  */
-    if (*str == ' ') {
-        errorDesc = "parseHttpRequest() error: whitespace after start-line";
-        return BAD_REQUEST;
-    }
+    if (*str == ' ')
+        SET_ERROR_AND_RETURN("parseHttpRequest() error: whitespace after start-line", BAD_REQUEST);
 
-    /* Parse the request line. */
-    p = copyUntilChar(str, reqLine->method, ' ', METHOD_SIZE, &len);
-    if (!p) {
-        errorDesc = "parseHttpRequest() error: EOL after method";
-        return BAD_REQUEST;
-    }
+    status = parseHeaders(&str, &len, headers);
+    if (status != ACCEPTED) return status;
 
-    /*  A server that receives a method longer than any that it implements
-        SHOULD respond with a 501 (Not Implemented) status code.  */
-    if (*(p - 1) != ' ') {
-        errorDesc = "parseHttpRequest() error: method too long";
-        return NOT_IMPLEMENTED;
-    }
-
-    p = copyUntilChar(p, reqLine->uri, ' ', URI_SIZE, &len);
-    if (!p) {
-        errorDesc = "parseHttpRequest() error: EOL after uri";
-        return BAD_REQUEST;
-    }
-
-    /*  A server that receives a request-target longer than any URI it
-        wishes to parse MUST respond with a 414 (URI Too Long) status code  */
-    if (*(p - 1) != ' ') {
-        errorDesc = "parseHttpRequest() error: URI too long";
-        return URI_TOO_LONG;
-    }
-
-    /* Skip over the HTTP version. */
-    p = copyUntilChar(p, NULL, '\n', 0, &len);
-    if (!p) return BAD_REQUEST;
-    if (len == 2 && *p == '\r' && *(p + 1) == '\n') return NO_HEADERS;
-
-    /* Parse the headers. */
-    while (p) {
-        /* key */
-        p = copyUntilChar(p, headerKey, ':', HEADER_BUF_SIZE, &len);
-        if (!p) {
-            errorDesc = "parseHttpRequest() error: EOL after key";
-            return BAD_REQUEST;
-        }
-        p++; len--; /* skip over whitespace */
-        if (!p) {
-            errorDesc = "parseHttpRequest() error: EOL after key";
-            return BAD_REQUEST;
-        }
-
-        /* val */
-        p = copyUntilChar(p, headerVal, '\r', HEADER_BUF_SIZE, &len);
-        if (!p) {
-            errorDesc = "parseHttpRequest() error: EOL after value";
-            return BAD_REQUEST;
-        }
-        p++; len--; /* skip over \n */
-        if (!p) {
-            errorDesc = "parseHttpRequest() error: EOL after value";
-            return BAD_REQUEST;
-        }
-
-        ht_insert(headers, headerKey, headerVal);
-        if (*p == '\r') break;
-    }
-
-    /*  A server MUST respond with a 400 (Bad Request) status code
-        to any HTTP/1.1 request message that lacks a Host header field  */
-    if (ht_search(headers, "host") == NULL) {
-        errorDesc = "parseHttpRequest() error: no Host header field";
-        return BAD_REQUEST;
-    }
-
-    /*  Parse the body if it is present.
-        Check the headers for Content-Length.  */
-    if (ht_search(headers, "content-length") != NULL && len > 2) {
-        p += 2;
-        len = atoi(ht_search(headers, "content-length"));
-        strncpy(body, p, len);
-    }
-
-    return true;
+    return parseBody(&str, &len, headers, body);
 }
 
 void readClient(const int c, int* len, char request[MAXLINE]) {
@@ -263,18 +276,31 @@ void sendHttpResponse(int c, int code, char* respMsg, char* cType, char* body) {
     }
 }
 
+/* The return value of 1 means that the client connection must be closed immediately. */
+int respond(int c, int status, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
+    if (!strcmp(reqLine->method, "get") && !strcmp(reqLine->uri, "/")) {
+        sendHttpResponse(c, 200, "OK", "text/html", "<html><h1>Front page</h1><img src=\"img.png\"></html>");
+    } else if (!strcmp(reqLine->method, "get") && !strcmp(reqLine->uri, "/img.png")) {
+        
+    } else {
+        sendHttpResponse(c, 404, "Not found", "text/plain", "Page not found");
+    }
+    return 0;
+}
+
 void handleClient(const int c, char cliIP[INET_ADDRSTRLEN]) {
     RequestLine reqLine;
     ht_hash_table* headers;
     char body[MAXLINE];
     char request[MAXLINE];
-    int len, keepAlive, parseReturn;
+    int len, keepAlive, status;
 
     loggerAttention("Client connected: %s\n", cliIP);
     headers = ht_new();
     keepAlive = 1;
 
     while (keepAlive) {
+        memset(body, 0, MAXLINE);
         readClient(c, &len, request);
         if (len < 0) {
             loggerError(stderr, "%s: %d\n", errorDesc, errno);
@@ -283,18 +309,14 @@ void handleClient(const int c, char cliIP[INET_ADDRSTRLEN]) {
             break;
 
         loggerInfo("%s\n", request);
-        parseReturn = parseHttpRequest(request, len, &reqLine, headers, body);
-        loggerError(stderr, "%s\n", errorDesc);
+        status = parseHttpRequest(request, len, &reqLine, headers, body);
+        if (status != ACCEPTED)
+            loggerError(stderr, "%s, %d\n", errorDesc, status);
 
-        if (ht_search(headers, "connection") != NULL) {
+        if (respond(c, status, &reqLine, headers, body))
+            break;
 
-        }
-
-        if (!strcmp(reqLine.method, "get") && !strcmp(reqLine.uri, "/")) {
-            sendHttpResponse(c, 200, "OK", "text/html", "<html><h1>Front page</h1></html>");
-        } else {
-            sendHttpResponse(c, 404, "Not found", "text/plain", "Page not found");
-        }
+        ht_clear(headers);
     }
 
     loggerAttention("Client disconnected: %s\n", cliIP);

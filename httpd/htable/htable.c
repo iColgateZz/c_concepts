@@ -42,6 +42,19 @@ void ht_del_item(ht_item* i) {
     free(i);
 }
 
+void ht_clear(ht_hash_table* ht) {
+    for (int i = 0; i < ht->size; i++) {
+        ht_item* item = ht->items[i];
+        if (item != NULL) {
+            if (item != &HT_DELETED_ITEM) {
+                ht_del_item(item);
+            }
+            ht->items[i] = NULL;
+        }
+    }
+    ht->count = 0;
+}
+
 ht_hash_table* ht_new_sized(const int base_size) {
     ht_hash_table* ht = malloc(sizeof(ht_hash_table));
     ht->base_size = base_size;
