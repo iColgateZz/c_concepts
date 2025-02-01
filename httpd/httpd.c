@@ -281,7 +281,60 @@ int respond(int c, int status, RequestLine* reqLine, ht_hash_table* headers, cha
     if (!strcmp(reqLine->method, "get") && !strcmp(reqLine->uri, "/")) {
         sendHttpResponse(c, 200, "OK", "text/html", "<html><h1>Front page</h1><img src=\"img.png\"></html>");
     } else if (!strcmp(reqLine->method, "get") && !strcmp(reqLine->uri, "/img.png")) {
-        
+        char buf[MAXLINE];
+        char chunk_header[20]; // Buffer for chunk size header
+        size_t bytes_read;
+
+        memset(buf, 0, MAXLINE);
+
+        sprintf(buf, 
+        "HTTP/1.1 200 OK\r\n"
+        "Server: httpd\r\n"
+        "Content-type: image/png\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n");
+
+        if (write(c, buf, strlen(buf)) < 0) {
+            perror("sendHttpResponse() error");
+            return 0;
+        }
+
+        FILE *file = fopen("img.png", "rb");
+        if (!file) {
+            perror("Failed to open file");
+            return 0;
+        }
+        while ((bytes_read = fread(buf, 1, MAXLINE, file)) > 0) {
+            // Prepare the chunk header
+            snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n", bytes_read);
+            if (write(c, chunk_header, strlen(chunk_header)) < 0) {
+                perror("write error");
+                fclose(file);
+                return 0;
+            }
+
+            // Write the chunk data
+            if (write(c, buf, bytes_read) < 0) {
+                perror("write error");
+                fclose(file);
+                return 0;
+            }
+
+            // Write the chunk trailer
+            if (write(c, "\r\n", 2) < 0) {
+                perror("write error");
+                fclose(file);
+                return 0;
+            }
+        }
+
+        // Write the final chunk (size 0)
+        if (write(c, "0\r\n\r\n", 5) < 0) {
+            perror("write error");
+        }
+
+        fclose(file);
     } else {
         sendHttpResponse(c, 404, "Not found", "text/plain", "Page not found");
     }
