@@ -34,10 +34,13 @@
 
 /* Definitions for the parser */
 #define BAD_REQUEST             400
+#define NOT_FOUND               404
+#define URI_TOO_LONG            414
+#define INTERNAL_SERVER_ERROR   500
 #define NOT_IMPLEMENTED         501
 #define VERSION_NOT_SUPPORTED   505
-#define URI_TOO_LONG            414
-#define ACCEPTED                0
+#define ACCEPTED                1
+#define NOT_ACCEPTED            0
 
 /* Macros */
 #define SET_ERROR_AND_RETURN(desc, code) \
@@ -132,25 +135,25 @@ int parseRequestLine(char** str, int* len, RequestLine* reqLine) {
 
     char* p = copyUntilChar(*str, reqLine->method, ' ', METHOD_SIZE, len);
     if (!p)
-        SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after method", BAD_REQUEST);
+        SET_ERROR_AND_RETURN("parseRequest() error: EOL after method", BAD_REQUEST);
 
     /*  A server that receives a method longer than any that it implements
         SHOULD respond with a 501 (Not Implemented) status code.  */
     if (*(p - 1) != ' ')
-        SET_ERROR_AND_RETURN("parseHttpRequest() error: method too long", NOT_IMPLEMENTED);
+        SET_ERROR_AND_RETURN("parseRequest() error: method too long", NOT_IMPLEMENTED);
 
     p = copyUntilChar(p, reqLine->uri, ' ', URI_SIZE, len);
     if (!p)
-        SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after URI", BAD_REQUEST);
+        SET_ERROR_AND_RETURN("parseRequest() error: EOL after URI", BAD_REQUEST);
 
     /*  A server that receives a request-target longer than any URI it
         wishes to parse MUST respond with a 414 (URI Too Long) status code  */
     if (*(p - 1) != ' ')
-        SET_ERROR_AND_RETURN("parseHttpRequest() error: URI too long", URI_TOO_LONG);
+        SET_ERROR_AND_RETURN("parseRequest() error: URI too long", URI_TOO_LONG);
 
     p = copyUntilChar(p, reqLine->version, '\r', METHOD_SIZE + 1, len);
     if (!p)
-        SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after version", BAD_REQUEST);
+        SET_ERROR_AND_RETURN("parseRequest() error: EOL after version", BAD_REQUEST);
     *str = p + 1; (*len)--;
     if (!(**str)) return BAD_REQUEST;
     if (*len == 2 && **str == '\r' && *(*str + 1) == '\n') return BAD_REQUEST;
@@ -169,23 +172,23 @@ int parseHeaders(char** str, int* len, ht_hash_table* headers) {
         /* key */
         char* p = copyUntilChar(*str, headerKey, ':', HEADER_BUF_SIZE, len);
         if (!p)
-            SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after key", BAD_REQUEST);
+            SET_ERROR_AND_RETURN("parseRequest() error: EOL after key", BAD_REQUEST);
         SKIP_WHITESPACE(p, len);
         if (!p)
-            SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after key", BAD_REQUEST);
+            SET_ERROR_AND_RETURN("parseRequest() error: EOL after key", BAD_REQUEST);
 
         /* val */
         p = copyUntilChar(p, headerVal, '\r', HEADER_BUF_SIZE, len);
         if (!p)
-            SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after value", BAD_REQUEST);
+            SET_ERROR_AND_RETURN("parseRequest() error: EOL after value", BAD_REQUEST);
         if (*(p - 1) != '\r')
-            SET_ERROR_AND_RETURN("parseHttpRequest() error: value too large", BAD_REQUEST);
+            SET_ERROR_AND_RETURN("parseRequest() error: value too large", BAD_REQUEST);
         SKIP_WHITESPACE(p, len);
         if (!p)
-            SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after value", BAD_REQUEST);
+            SET_ERROR_AND_RETURN("parseRequest() error: EOL after value", BAD_REQUEST);
 
         if (ht_search(headers, headerKey) != NULL)
-            SET_ERROR_AND_RETURN("parseHttpRequest() error: duplicate headers", BAD_REQUEST);
+            SET_ERROR_AND_RETURN("parseRequest() error: duplicate headers", BAD_REQUEST);
         
         /* There might be a problem with cookies */
         ht_insert(headers, headerKey, headerVal);
@@ -196,7 +199,7 @@ int parseHeaders(char** str, int* len, ht_hash_table* headers) {
     /*  A server MUST respond with a 400 (Bad Request) status code
         to any HTTP/1.1 request message that lacks a Host header field  */
     if (ht_search(headers, "host") == NULL)
-        SET_ERROR_AND_RETURN("parseHttpRequest() error: no Host field", BAD_REQUEST);
+        SET_ERROR_AND_RETURN("parseRequest() error: no Host field", BAD_REQUEST);
 
     return ACCEPTED;
 }
@@ -209,14 +212,14 @@ int parseBody(char** str, int* len, ht_hash_table* headers, char body[MAXLINE]) 
         *str += 2;
         int expectedLen = atoi(contentLen);
         if (*len != expectedLen)
-            SET_ERROR_AND_RETURN("parseHttpRequest() error: problems with length", BAD_REQUEST);
+            SET_ERROR_AND_RETURN("parseRequest() error: problems with length", BAD_REQUEST);
         strncpy(body, *str, *len);
     }
     return ACCEPTED;
 }
 
 /* return ACCEPTED on success or a custom code on error */
-int parseHttpRequest(char* str, int len, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
+int parseRequest(char* str, int len, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
     char* p;
     int status;
 
@@ -230,14 +233,14 @@ int parseHttpRequest(char* str, int len, RequestLine* reqLine, ht_hash_table* he
     if (status != ACCEPTED) return status;
 
     if (strncmp("http/1.1", reqLine->version, METHOD_SIZE + 1) != 0)
-        SET_ERROR_AND_RETURN("parseHttpRequest() error: version not supported", VERSION_NOT_SUPPORTED);
+        SET_ERROR_AND_RETURN("parseRequest() error: version not supported", VERSION_NOT_SUPPORTED);
 
     /*  A recipient that receives whitespace between the start-line and 
         the first header field MUST either reject the message as invalid or ...
         The server SHOULD respond with a 400 (Bad Request) response 
         and close the connection.  */
     if (*str == ' ')
-        SET_ERROR_AND_RETURN("parseHttpRequest() error: whitespace after start-line", BAD_REQUEST);
+        SET_ERROR_AND_RETURN("parseRequest() error: whitespace after start-line", BAD_REQUEST);
 
     status = parseHeaders(&str, &len, headers);
     if (status != ACCEPTED) return status;
@@ -245,7 +248,7 @@ int parseHttpRequest(char* str, int len, RequestLine* reqLine, ht_hash_table* he
     return parseBody(&str, &len, headers, body);
 }
 
-void readClient(const int c, int* len, char request[MAXLINE]) {
+void readRequest(const int c, int* len, char request[MAXLINE]) {
     int ret;
     fd_set rfds;
     struct timeval tv;
@@ -266,12 +269,13 @@ void readClient(const int c, int* len, char request[MAXLINE]) {
 
     loggerWarning("Len: %d\n", *len);
     if (*len < 0)
-        errorDesc = "readClient() error";
+        errorDesc = "readRequest() error";
 
     return;
 }
 
-void sendHttpResponse(int c, int code, char* respMsg, char* cType, char* body) {
+void sendHttpResponse(int c, int code, char* respMsg,
+                    char* contentType, char* connectionType, char* body) {
     char buf[MAXLINE];
 
     memset(buf, 0, MAXLINE);
@@ -281,83 +285,110 @@ void sendHttpResponse(int c, int code, char* respMsg, char* cType, char* body) {
     "Server: httpd\r\n"
     "Content-type: %s\r\n"
     "Content-Length: %zu\r\n"
-    "Connection: keep-alive\r\n"
+    "Connection: %s\r\n"
     "\r\n"
     "%s",
-    code, respMsg, cType, strlen(body), body);
+    code, respMsg, contentType, strlen(body), connectionType, body);
 
     if (write(c, buf, strlen(buf)) < 0) {
         loggerError(stderr, "sendHttpResponse() error: %d\n", errno);
     }
 }
 
-/* The return value of 1 means that the client connection must be closed immediately. */
-int respond(int c, int status, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
-    if (!strcmp(reqLine->method, "get") && !strcmp(reqLine->uri, "/")) {
-        sendHttpResponse(c, 200, "OK", "text/html", "<html><h1>Front page</h1><img src=\"img.png\"></html>");
-    } else if (!strcmp(reqLine->method, "get") && !strcmp(reqLine->uri, "/img.png")) {
-        char buf[MAXLINE];
-        char chunk_header[20]; // Buffer for chunk size header
-        size_t bytes_read;
+int sendFileViaHttp(int c, const char* fileName) {
+    char buf[MAXLINE];
+    char chunk_header[20];
+    size_t bytes_read;
 
-        memset(buf, 0, MAXLINE);
+    memset(buf, 0, MAXLINE);
 
-        sprintf(buf, 
-        "HTTP/1.1 200 OK\r\n"
-        "Server: httpd\r\n"
-        "Content-type: image/png\r\n"
-        "Transfer-Encoding: chunked\r\n"
-        "Connection: keep-alive\r\n"
-        "\r\n");
+    sprintf(buf, 
+    "HTTP/1.1 200 OK\r\n"
+    "Server: httpd\r\n"
+    "Content-type: image/png\r\n"
+    "Transfer-Encoding: chunked\r\n"
+    "Connection: keep-alive\r\n"
+    "\r\n");
 
-        if (write(c, buf, strlen(buf)) < 0) {
-            perror("sendHttpResponse() error");
-            return 0;
-        }
-
-        FILE *file = fopen("img.png", "rb");
-        if (!file) {
-            perror("Failed to open file");
-            return 0;
-        }
-        while ((bytes_read = fread(buf, 1, MAXLINE, file)) > 0) {
-            // Prepare the chunk header
-            snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n", bytes_read);
-            if (write(c, chunk_header, strlen(chunk_header)) < 0) {
-                perror("write error");
-                fclose(file);
-                return 0;
-            }
-
-            // Write the chunk data
-            if (write(c, buf, bytes_read) < 0) {
-                perror("write error");
-                fclose(file);
-                return 0;
-            }
-
-            // Write the chunk trailer
-            if (write(c, "\r\n", 2) < 0) {
-                perror("write error");
-                fclose(file);
-                return 0;
-            }
-        }
-
-        // Write the final chunk (size 0)
-        if (write(c, "0\r\n\r\n", 5) < 0) {
-            perror("write error");
-        }
-
-        fclose(file);
-    } else {
-        sendHttpResponse(c, 404, "Not found", "text/plain", "Page not found");
+    if (write(c, buf, strlen(buf)) < 0) {
+        loggerError(stderr, "Error writing the headers\n");
+        return INTERNAL_SERVER_ERROR;
     }
+
+    FILE *file = fopen(fileName, "rb");
+    if (!file) {
+        loggerError(stderr, "Cannot open the file %s\n", fileName);
+        return INTERNAL_SERVER_ERROR;
+    }
+    while ((bytes_read = fread(buf, 1, MAXLINE, file)) > 0) {
+        // Prepare the chunk header
+        snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n", bytes_read);
+        if (write(c, chunk_header, strlen(chunk_header)) < 0) {
+            loggerError(stderr, "Error writing the chunk headers\n");
+            fclose(file);
+            return INTERNAL_SERVER_ERROR;
+        }
+
+        // Write the chunk data
+        if (write(c, buf, bytes_read) < 0) {
+            loggerError(stderr, "Error writing the chunk data\n");
+            fclose(file);
+            return INTERNAL_SERVER_ERROR;
+        }
+
+        // Write the chunk trailer
+        if (write(c, "\r\n", 2) < 0) {
+            loggerError(stderr, "Error writing the chunk trailer\n");
+            fclose(file);
+            return INTERNAL_SERVER_ERROR;
+        }
+    }
+    fclose(file);
+    // Write the final chunk (size 0)
+    if (write(c, "0\r\n\r\n", 5) < 0) {
+        loggerError(stderr, "Error writing the final chunk\n");
+        return INTERNAL_SERVER_ERROR;
+    }
+
+    return ACCEPTED;
+}
+
+int handleNotAcceptedRequest(int c, int status) {
+    sendHttpResponse(c, status, "", "text/plain", "close", "");
+    return NOT_ACCEPTED;
+}
+
+int handleGetRequest(int c, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
+    normalizePath(URI_SIZE, reqLine->uri);
+    /* Determine whether the given path leads to a file or a directory. */
+    if (!strcmp(reqLine->uri, "/")) {
+        sendHttpResponse(c, 200, "OK", "text/html", "keep-alive", "<html><h1>Front page</h1><img src=\"img.png\"></html>");
+        return ACCEPTED;
+    } else if (!strcmp(reqLine->uri, "img.png")) {
+        return sendFileViaHttp(c, reqLine->uri);
+    } else {
+        sendHttpResponse(c, 404, "Not found", "text/plain", "close", "Page not found");
+        return NOT_FOUND;
+    }
+}
+
+int handleAcceptedRequest(int c, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
+    if (!strcmp(reqLine->method, "get")) return handleGetRequest(c, reqLine, headers, body);
+    /* Currently only understands GET requests */
+    else return NOT_IMPLEMENTED;
+}
+
+/* The return value of NOT_ACCEPTED means that the client connection must be closed immediately. */
+int respond(int c, int status, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
+    if (status != ACCEPTED) return handleNotAcceptedRequest(c, status);
+    
+    status = handleAcceptedRequest(c, reqLine, headers, body);
+    if (status != ACCEPTED) return handleNotAcceptedRequest(c, status);
     /*
         https://datatracker.ietf.org/doc/html/rfc9110#name-identifying-content
         https://datatracker.ietf.org/doc/html/rfc9110#name-rejecting-misdirected-reque
     */
-    return 0;
+    return ACCEPTED;
 }
 
 void handleClient(const int c, char cliIP[INET_ADDRSTRLEN]) {
@@ -373,20 +404,16 @@ void handleClient(const int c, char cliIP[INET_ADDRSTRLEN]) {
 
     while (keepAlive) {
         memset(body, 0, MAXLINE);
-        readClient(c, &len, request);
-        if (len < 0) {
-            loggerError(stderr, "%s: %d\n", errorDesc, errno);
+        readRequest(c, &len, request);
+        if (len <= 0) {
+            if (len < 0)
+                loggerError(stderr, "%s: %d\n", errorDesc, errno);
             break;
-        } else if (len == 0)
-            break;
+        }
 
         loggerInfo("%s\n", request);
-        status = parseHttpRequest(request, len, &reqLine, headers, body);
-        if (status != ACCEPTED)
-            loggerError(stderr, "%s, %d\n", errorDesc, status);
-
-        if (respond(c, status, &reqLine, headers, body))
-            break;
+        status = parseRequest(request, len, &reqLine, headers, body);
+        keepAlive = respond(c, status, &reqLine, headers, body);
 
         ht_clear(headers);
     }

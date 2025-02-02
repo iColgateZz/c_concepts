@@ -41,7 +41,7 @@ char* copyUntilChar(char* text, char* buf, const char ch, int bufSize, int* text
     }
 }
 
-void normalizePathDoubleDot(char* newPath, int* j) {
+void private__normalizePathDoubleDot(char* newPath, int* j) {
     bool slashSeen = 0;
     while (*j >= 0) {
         char c = newPath[*j];
@@ -70,7 +70,7 @@ void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
     int j = 0;
     int i = 0;
     //TODO I actually need to choose what to return in some cases: '/' or '';
-    
+
     /* should probably return index.html */
     if (path[0] == '/' && path[1] == 0) return;
 
@@ -97,7 +97,7 @@ void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
             isDoubleDot = 0;
             isSlash = 1;
             bool slashSeen = 0;
-            normalizePathDoubleDot(newPath, &j);
+            private__normalizePathDoubleDot(newPath, &j);
         } else if (path[i] == '/') {
             isSlash = 1;
             newPath[j++] = '/';
@@ -119,7 +119,7 @@ void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
         newPath[j--] = 0;
         newPath[j] = 0;
     } else if (isDoubleDot && j >= 3 && newPath[j - 3] == '/') {
-        normalizePathDoubleDot(newPath, &j);
+        private__normalizePathDoubleDot(newPath, &j);
     }
     newPath[j] = 0;
     strncpy(path, newPath, PATH_LENGTH);
