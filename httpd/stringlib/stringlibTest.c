@@ -33,7 +33,9 @@ int main(void) {
         "/.",
         "/..",
         "////home/results",
-        "////home///results////"
+        "////home///results////",
+        ".",
+        ".."
     };
 
     char expectedResults[][CONST] = {
@@ -41,14 +43,14 @@ int main(void) {
         "lol",
         "lol",
         "lol",
-        "",
+        "/",
         "/",
         "lol",
         "lol",
         "a/lol",
         "lol",
         "..qwe",
-        "",
+        "/",
         "home/user/docs",
         "home/user/docs/",
         "home/user/docs",
@@ -61,7 +63,9 @@ int main(void) {
         "/",
         "/",
         "home/results",
-        "home/results/"
+        "home/results/",
+        "/",
+        "/"
     };
 
     for (int i = 0; i < sizeof(testcases) / 8000; i++) {

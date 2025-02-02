@@ -64,18 +64,12 @@ void private__normalizePathDoubleDot(char* newPath, int* j) {
 */
 void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
     char newPath[PATH_LENGTH];
-    bool isDot;
-    bool isDoubleDot;
-    bool isSlash;
-    int j = 0;
-    int i = 0;
-    //TODO I actually need to choose what to return in some cases: '/' or '';
+    bool isDot = false, isDoubleDot = false, isSlash = false;
+    int j = 0, i = 0;
 
-    /* should probably return index.html */
     if (path[0] == '/' && path[1] == 0) return;
 
     memset(newPath, 0, PATH_LENGTH);
-    isDot = isDoubleDot = isSlash = false;
 
     if (path[0] == '/') {
         i = 1;
@@ -96,7 +90,6 @@ void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
         } else if (path[i] == '/' && isDoubleDot) {
             isDoubleDot = 0;
             isSlash = 1;
-            bool slashSeen = 0;
             private__normalizePathDoubleDot(newPath, &j);
         } else if (path[i] == '/') {
             isSlash = 1;
@@ -112,16 +105,17 @@ void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
         } else if (path[i] == 0 || path[i] == '?')
             break;
     }
-    if (!strcmp("..", newPath) || !strcmp(".", newPath)) {
-        newPath[0] = '/';
-        newPath[1] = 0;
+
+    if (!strncmp("..", newPath, PATH_LENGTH) || !strncmp(".", newPath, PATH_LENGTH)) {
+        strncpy(newPath, "/", PATH_LENGTH);
     } else if (isDot && j >= 2 && newPath[j - 2] == '/') {
         newPath[j--] = 0;
         newPath[j] = 0;
-    } else if (isDoubleDot && j >= 3 && newPath[j - 3] == '/') {
+    } else if (isDoubleDot && j >= 3 && newPath[j - 3] == '/')
         private__normalizePathDoubleDot(newPath, &j);
-    }
+
     newPath[j] = 0;
+    if (!strncmp(newPath, "", PATH_LENGTH))
+        strncpy(newPath, "/", PATH_LENGTH);
     strncpy(path, newPath, PATH_LENGTH);
-    return;
 }

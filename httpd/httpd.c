@@ -360,11 +360,20 @@ int handleNotAcceptedRequest(int c, int status) {
 
 int handleGetRequest(int c, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
     normalizePath(URI_SIZE, reqLine->uri);
-    /* Determine whether the given path leads to a file or a directory. */
+    /*
+        Determine whether the given path leads to a file or a directory.
+        EndsWith / (presumably a dir) -> 404
+        Dir -> 404
+        File but invalid path -> 404
+        / -> static/index.html
+        Determine file type
+        Start sending the file
+        Error -> 500
+    */
     if (!strcmp(reqLine->uri, "/")) {
-        sendHttpResponse(c, 200, "OK", "text/html", "keep-alive", "<html><h1>Front page</h1><img src=\"img.png\"></html>");
+        sendHttpResponse(c, 200, "OK", "text/html", "keep-alive", "<html><h1>Front page</h1><img src=\"static/img.png\"></html>");
         return ACCEPTED;
-    } else if (!strcmp(reqLine->uri, "img.png")) {
+    } else if (!strcmp(reqLine->uri, "static/img.png")) {
         return sendFileViaHttp(c, reqLine->uri);
     } else {
         sendHttpResponse(c, 404, "Not found", "text/plain", "close", "Page not found");
