@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <stdbool.h>
+
+char* allowedMethods[4] = {"get", "post", "put", "delete"};
 
 /* 
     The string is copied to buf, it is zero-terminated.
@@ -36,4 +39,89 @@ char* copyUntilChar(char* text, char* buf, const char ch, int bufSize, int* text
         *textSize -= i;
         return tmp;
     }
+}
+
+void normalizePathDoubleDot(char* newPath, int* j) {
+    bool slashSeen = 0;
+    while (*j >= 0) {
+        char c = newPath[*j];
+        if (c == '/' && slashSeen) {
+            (*j)++;
+            break;
+        } else if (c == '/') slashSeen = 1;
+        newPath[*j] = 0;
+        if (*j > 0) (*j)--;
+        else if (*j == 0) break;
+    }
+}
+
+/*
+    Remove ./ and ../
+    Remove the front /
+    Remove //
+    Remove query parameters (for now)
+    The / at the end is preserved
+*/
+void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
+    char newPath[PATH_LENGTH];
+    bool isDot;
+    bool isDoubleDot;
+    bool isSlash;
+    int j = 0;
+    int i = 0;
+    //TODO I actually need to choose what to return in some cases: '/' or '';
+    
+    /* should probably return index.html */
+    if (path[0] == '/' && path[1] == 0) return;
+
+    memset(newPath, 0, PATH_LENGTH);
+    isDot = isDoubleDot = isSlash = false;
+
+    if (path[0] == '/') {
+        i = 1;
+        isSlash = 1;
+    }
+
+    for (; i < PATH_LENGTH - 1; i++) {
+        if (isalnum(path[i])) {
+            newPath[j++] = path[i];
+            isDot = isDoubleDot = isSlash = 0;
+        } else if (path[i] == '/' && isSlash) {
+            continue;
+        } else if (path[i] == '/' && isDot) {
+            isDot = 0;
+            isSlash = 1;
+            newPath[j--] = 0;
+            newPath[j] = 0;
+        } else if (path[i] == '/' && isDoubleDot) {
+            isDoubleDot = 0;
+            isSlash = 1;
+            bool slashSeen = 0;
+            normalizePathDoubleDot(newPath, &j);
+        } else if (path[i] == '/') {
+            isSlash = 1;
+            newPath[j++] = '/';
+        } else if (path[i] == '.' && isDot) {
+            isDot = 0;
+            isDoubleDot = 1;
+            newPath[j++] = '.';
+        } else if (path[i] == '.') {
+            isDot = 1;
+            isSlash = 0;
+            newPath[j++] = '.';
+        } else if (path[i] == 0 || path[i] == '?')
+            break;
+    }
+    if (!strcmp("..", newPath) || !strcmp(".", newPath)) {
+        newPath[0] = '/';
+        newPath[1] = 0;
+    } else if (isDot && j >= 2 && newPath[j - 2] == '/') {
+        newPath[j--] = 0;
+        newPath[j] = 0;
+    } else if (isDoubleDot && j >= 3 && newPath[j - 3] == '/') {
+        normalizePathDoubleDot(newPath, &j);
+    }
+    newPath[j] = 0;
+    strncpy(path, newPath, PATH_LENGTH);
+    return;
 }

@@ -34,9 +34,8 @@
 
 /* Definitions for the parser */
 #define BAD_REQUEST             400
-#define NO_HEADERS              2
-#define NO_BODY                 3
 #define NOT_IMPLEMENTED         501
+#define VERSION_NOT_SUPPORTED   505
 #define URI_TOO_LONG            414
 #define ACCEPTED                0
 
@@ -47,10 +46,17 @@
         return code; \
     } while (0)
 
+#define SKIP_WHITESPACE(p, len) \
+    do { \
+        p++; \
+        (*len)--; \
+    } while (*p == ' ' && *len > 0);
+
 /* Structures */
 typedef struct RequestLine {
     char method[METHOD_SIZE];
     char uri[URI_SIZE];
+    char version[METHOD_SIZE + 1];
 } RequestLine;
 
 /* Global */
@@ -142,10 +148,12 @@ int parseRequestLine(char** str, int* len, RequestLine* reqLine) {
     if (*(p - 1) != ' ')
         SET_ERROR_AND_RETURN("parseHttpRequest() error: URI too long", URI_TOO_LONG);
 
-    /* Skip over the HTTP version. */
-    *str = copyUntilChar(p, NULL, '\n', 0, len);
-    if (!(*str)) return BAD_REQUEST;
-    if (*len == 2 && *p == '\r' && *(p + 1) == '\n') return NO_HEADERS;
+    p = copyUntilChar(p, reqLine->version, '\r', METHOD_SIZE + 1, len);
+    if (!p)
+        SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after version", BAD_REQUEST);
+    *str = p + 1; (*len)--;
+    if (!(**str)) return BAD_REQUEST;
+    if (*len == 2 && **str == '\r' && *(*str + 1) == '\n') return BAD_REQUEST;
 
     return ACCEPTED;
 }
@@ -162,7 +170,7 @@ int parseHeaders(char** str, int* len, ht_hash_table* headers) {
         char* p = copyUntilChar(*str, headerKey, ':', HEADER_BUF_SIZE, len);
         if (!p)
             SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after key", BAD_REQUEST);
-        p++; (*len)--; /* skip over whitespace */
+        SKIP_WHITESPACE(p, len);
         if (!p)
             SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after key", BAD_REQUEST);
 
@@ -170,12 +178,16 @@ int parseHeaders(char** str, int* len, ht_hash_table* headers) {
         p = copyUntilChar(p, headerVal, '\r', HEADER_BUF_SIZE, len);
         if (!p)
             SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after value", BAD_REQUEST);
-        p++; (*len)--; /* skip over \n */
+        if (*(p - 1) != '\r')
+            SET_ERROR_AND_RETURN("parseHttpRequest() error: value too large", BAD_REQUEST);
+        SKIP_WHITESPACE(p, len);
         if (!p)
             SET_ERROR_AND_RETURN("parseHttpRequest() error: EOL after value", BAD_REQUEST);
 
         if (ht_search(headers, headerKey) != NULL)
             SET_ERROR_AND_RETURN("parseHttpRequest() error: duplicate headers", BAD_REQUEST);
+        
+        /* There might be a problem with cookies */
         ht_insert(headers, headerKey, headerVal);
         *str = p;
         if (**str == '\r') break;
@@ -192,7 +204,7 @@ int parseHeaders(char** str, int* len, ht_hash_table* headers) {
 int parseBody(char** str, int* len, ht_hash_table* headers, char body[MAXLINE]) {
     const char* contentLen = ht_search(headers, "content-length");
 
-    if (*len == 2) return NO_BODY;
+    if (*len == 2) return ACCEPTED;
     if (contentLen != NULL && *len > 2) {
         *str += 2;
         int expectedLen = atoi(contentLen);
@@ -216,6 +228,9 @@ int parseHttpRequest(char* str, int len, RequestLine* reqLine, ht_hash_table* he
 
     status = parseRequestLine(&str, &len, reqLine);
     if (status != ACCEPTED) return status;
+
+    if (strncmp("http/1.1", reqLine->version, METHOD_SIZE + 1) != 0)
+        SET_ERROR_AND_RETURN("parseHttpRequest() error: version not supported", VERSION_NOT_SUPPORTED);
 
     /*  A recipient that receives whitespace between the start-line and 
         the first header field MUST either reject the message as invalid or ...
@@ -338,6 +353,10 @@ int respond(int c, int status, RequestLine* reqLine, ht_hash_table* headers, cha
     } else {
         sendHttpResponse(c, 404, "Not found", "text/plain", "Page not found");
     }
+    /*
+        https://datatracker.ietf.org/doc/html/rfc9110#name-identifying-content
+        https://datatracker.ietf.org/doc/html/rfc9110#name-rejecting-misdirected-reque
+    */
     return 0;
 }
 
