@@ -3,8 +3,7 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <stdbool.h>
-
-char* allowedMethods[4] = {"get", "post", "put", "delete"};
+#include <sys/stat.h>
 
 /* 
     The string is copied to buf, it is zero-terminated.
@@ -67,7 +66,11 @@ void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
     bool isDot = false, isDoubleDot = false, isSlash = false;
     int j = 0, i = 0;
 
-    if (path[0] == '/' && path[1] == 0) return;
+    if (!strcmp("", path)) return;
+    if (!strcmp("/", path)) {
+        path[0] = 0;
+        return;
+    }
 
     memset(newPath, 0, PATH_LENGTH);
 
@@ -107,7 +110,7 @@ void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
     }
 
     if (!strncmp("..", newPath, PATH_LENGTH) || !strncmp(".", newPath, PATH_LENGTH)) {
-        strncpy(newPath, "/", PATH_LENGTH);
+        newPath[0] = 0;
     } else if (isDot && j >= 2 && newPath[j - 2] == '/') {
         newPath[j--] = 0;
         newPath[j] = 0;
@@ -115,7 +118,27 @@ void normalizePath(const size_t PATH_LENGTH, char path[PATH_LENGTH]) {
         private__normalizePathDoubleDot(newPath, &j);
 
     newPath[j] = 0;
-    if (!strncmp(newPath, "", PATH_LENGTH))
-        strncpy(newPath, "/", PATH_LENGTH);
     strncpy(path, newPath, PATH_LENGTH);
+}
+
+bool endsWithChar(const char* str, const char c) {
+    int k = strlen(str);
+    if (k == 0) return 0;
+    return *(str + k - 1) == c;
+}
+
+char* getExtension(char* str) {
+    char* lastSlash = strrchr(str, '/');
+    char* lastDot;
+    if (lastSlash == NULL)
+        return strrchr(str, '.');
+    else
+        return strrchr(lastSlash, '.');
+}
+
+bool isDirectory(const char *path) {
+   struct stat statbuf;
+   if (stat(path, &statbuf) != 0)
+       return 1;
+   return S_ISDIR(statbuf.st_mode);
 }

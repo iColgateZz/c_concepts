@@ -25,7 +25,7 @@
 #include "htable/htable.c"
 
 /* Definitions */
-#define LISTENADDR              "192.168.1.239"
+#define LISTENADDR              "0.0.0.0"
 #define MAXLINE                 65536 //64kb
 #define HEADER_BUF_SIZE         256
 #define METHOD_SIZE             8
@@ -274,7 +274,7 @@ void readRequest(const int c, int* len, char request[MAXLINE]) {
     return;
 }
 
-void sendHttpResponse(int c, int code, char* respMsg,
+int sendSimpleResponse(int c, int code, char* respMsg,
                     char* contentType, char* connectionType, char* body) {
     char buf[MAXLINE];
 
@@ -291,11 +291,42 @@ void sendHttpResponse(int c, int code, char* respMsg,
     code, respMsg, contentType, strlen(body), connectionType, body);
 
     if (write(c, buf, strlen(buf)) < 0) {
-        loggerError(stderr, "sendHttpResponse() error: %d\n", errno);
+        loggerError(stderr, "sendSimpleResponse() error: %d\n", errno);
+        return INTERNAL_SERVER_ERROR;
     }
+    return ACCEPTED;
 }
 
-int sendFileViaHttp(int c, const char* fileName) {
+char* getContentType(char* filePath) {
+    char* ext = getExtension(filePath);
+    if (!ext) {
+        return "application/octet-stream";
+    }
+    if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm") == 0) {
+        return "text/html";
+    } else if (strcmp(ext, ".css") == 0) {
+        return "text/css";
+    } else if (strcmp(ext, ".js") == 0) {
+        return "application/javascript";
+    } else if (strcmp(ext, ".json") == 0) {
+        return "application/json";
+    } else if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0) {
+        return "image/jpeg";
+    } else if (strcmp(ext, ".png") == 0) {
+        return "image/png";
+    } else if (strcmp(ext, ".gif") == 0) {
+        return "image/gif";
+    } else if (strcmp(ext, ".svg") == 0) {
+        return "image/svg+xml";
+    } else if (strcmp(ext, ".txt") == 0) {
+        return "text/plain";
+    } else if (strcmp(ext, ".pdf") == 0) {
+        return "application/pdf";
+    }
+    return "application/octet-stream";
+}
+
+int sendFileViaHttp(int c, char* fileName) {
     char buf[MAXLINE];
     char chunk_header[20];
     size_t bytes_read;
@@ -305,10 +336,10 @@ int sendFileViaHttp(int c, const char* fileName) {
     sprintf(buf, 
     "HTTP/1.1 200 OK\r\n"
     "Server: httpd\r\n"
-    "Content-type: image/png\r\n"
+    "Content-type: %s\r\n"
     "Transfer-Encoding: chunked\r\n"
     "Connection: keep-alive\r\n"
-    "\r\n");
+    "\r\n", getExtension(fileName));
 
     if (write(c, buf, strlen(buf)) < 0) {
         loggerError(stderr, "Error writing the headers\n");
@@ -321,7 +352,6 @@ int sendFileViaHttp(int c, const char* fileName) {
         return INTERNAL_SERVER_ERROR;
     }
     while ((bytes_read = fread(buf, 1, MAXLINE, file)) > 0) {
-        // Prepare the chunk header
         snprintf(chunk_header, sizeof(chunk_header), "%zx\r\n", bytes_read);
         if (write(c, chunk_header, strlen(chunk_header)) < 0) {
             loggerError(stderr, "Error writing the chunk headers\n");
@@ -329,14 +359,12 @@ int sendFileViaHttp(int c, const char* fileName) {
             return INTERNAL_SERVER_ERROR;
         }
 
-        // Write the chunk data
         if (write(c, buf, bytes_read) < 0) {
             loggerError(stderr, "Error writing the chunk data\n");
             fclose(file);
             return INTERNAL_SERVER_ERROR;
         }
 
-        // Write the chunk trailer
         if (write(c, "\r\n", 2) < 0) {
             loggerError(stderr, "Error writing the chunk trailer\n");
             fclose(file);
@@ -344,7 +372,6 @@ int sendFileViaHttp(int c, const char* fileName) {
         }
     }
     fclose(file);
-    // Write the final chunk (size 0)
     if (write(c, "0\r\n\r\n", 5) < 0) {
         loggerError(stderr, "Error writing the final chunk\n");
         return INTERNAL_SERVER_ERROR;
@@ -354,7 +381,7 @@ int sendFileViaHttp(int c, const char* fileName) {
 }
 
 int handleNotAcceptedRequest(int c, int status) {
-    sendHttpResponse(c, status, "", "text/plain", "close", "");
+    sendSimpleResponse(c, status, "", "text/plain", "close", "");
     return NOT_ACCEPTED;
 }
 
@@ -370,15 +397,9 @@ int handleGetRequest(int c, RequestLine* reqLine, ht_hash_table* headers, char b
         Start sending the file
         Error -> 500
     */
-    if (!strcmp(reqLine->uri, "/")) {
-        sendHttpResponse(c, 200, "OK", "text/html", "keep-alive", "<html><h1>Front page</h1><img src=\"static/img.png\"></html>");
-        return ACCEPTED;
-    } else if (!strcmp(reqLine->uri, "static/img.png")) {
-        return sendFileViaHttp(c, reqLine->uri);
-    } else {
-        sendHttpResponse(c, 404, "Not found", "text/plain", "close", "Page not found");
-        return NOT_FOUND;
-    }
+    if (!strcmp("", reqLine->uri)) strncpy(reqLine->uri, "static/index.html", URI_SIZE);
+    if (isDirectory(reqLine->uri) || endsWithChar(reqLine->uri, '/')) return NOT_FOUND;
+    return sendFileViaHttp(c, reqLine->uri);
 }
 
 int handleAcceptedRequest(int c, RequestLine* reqLine, ht_hash_table* headers, char body[MAXLINE]) {
